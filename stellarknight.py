@@ -2,6 +2,7 @@ import os
 import time
 import msvcrt
 import json
+import random
 
 # --- UTILITIES ---
 def clear():
@@ -132,75 +133,238 @@ def login_or_signup():
             time.sleep(1)
             return username
 
-# --- CHARACTER ---
-def build_character(head="center", leg_frame=1, breathe=False):
-    if head == "left":
-        h = " <o"
-    elif head == "right":
-        h = "o> "
-    else:
-        h = " O " if breathe else " o "
-    arms = "/|\\"
-    legs = "/ \\" if leg_frame == 1 else "/|\\"
-    return [h, arms, legs]
 
-ROOM_WIDTH = 60
-player_pos = 10
-frame = 0
+# first planet + health + enemies + celestial beginnings item
+# --- FIRST PLANET MAP ---
+PLANET = [
+    "                                                            ^^^                       ",
+    "                                                           ^^^^^                      ",
+    "                                                     ^^^                               ",
+    "                                                ^^^^^^^                                 ",
+    "                                                                                       ",
+    "                                    ^^^^^                                                ",
+    "                       ^^^                                                        ^^^  ",
+    "                ^^^^^^^^^                                                   ^^^^^^^    ",
+    "                                                                                       ",
+    "###################################^^^^^^^^^^^^^^^^^^^^^#############################",
+]
 
-def draw_scene(player_pos, head_dir="center", leg_frame=1, breathe=False):
+PLANET_HEIGHT = len(PLANET)
+PLANET_WIDTH = len(PLANET[0])
+
+CAM_VIEW = 60
+player_screen_x = CAM_VIEW // 2
+
+player_world_x = 5
+player_y = 8
+y_velocity = 0
+
+# --- GRAVITY + MOVEMENT TWEAKS ---
+GRAVITY = 0.3           # less instant falling, floaty
+JUMP_FORCE = -4         # slightly lower jump force, floaty
+MAX_FALL_SPEED = 2      # slower falling speed
+
+# --- PLAYER STATS ---
+player_speed = 1
+player_jump = JUMP_FORCE
+player_dash_ready = False
+dash_cooldown = 0
+dash_time = 0
+DASH_DURATION = 5  # frames
+DASH_SPEED = 3
+
+# --- HEALTH SYSTEM ---
+max_health = 5
+health = max_health
+celestial_adrenaline = False
+adrenaline_time = 0
+HEART_REGEN_DELAY = 5
+last_damage_time = 0
+
+# --- ITEMS ---
+inventory = []
+latest_item = None
+item_emoji = "✨"
+celestial_item_obtained = False
+# place item at top of parkour section
+item_pos = (35, 3)
+
+# --- ENEMIES ---
+enemies = []
+# slower and fewer enemies for this level
+for _ in range(2):
+    ex = random.randint(10, PLANET_WIDTH - 10)
+    ey = 8
+    dir = random.choice([-1, 1])
+    enemies.append({"x": ex, "y": ey, "dir": dir, "speed": 0.2})
+
+def is_solid(x, y):
+    if x < 0 or x >= PLANET_WIDTH or y < 0 or y >= PLANET_HEIGHT:
+        return True
+    return PLANET[y][x] in ["#", "^"]
+
+# --- DRAW SCENE ---
+def draw_scene(cam_pos):
     clear()
-    spaces = " " * player_pos
-    sprite = build_character(head_dir, leg_frame, breathe)
-    for line in sprite:
-        print(spaces + line)
-    print("\n" + "#" * ROOM_WIDTH)
-    print("\n[ A - Left | D - Right | ENTER - Quit ]")
+    for row_i in range(PLANET_HEIGHT):
+        row = list(PLANET[row_i][cam_pos:cam_pos+CAM_VIEW])
+        # draw player
+        if row_i == player_y:
+            px_screen = int(player_world_x) - cam_pos
+            if 0 <= px_screen < CAM_VIEW:
+                row[px_screen] = "o"
+        # draw item
+        if not celestial_item_obtained:
+            ix_screen = item_pos[0] - cam_pos
+            if 0 <= ix_screen < CAM_VIEW and row_i == item_pos[1]:
+                row[ix_screen] = "✦"
+        # draw enemies
+        for e in enemies:
+            ex_screen = int(e["x"]) - cam_pos
+            if row_i == e["y"] and 0 <= ex_screen < CAM_VIEW:
+                row[ex_screen] = "🌌"
+        print("".join(row))
 
-def move_player(dx):
-    global player_pos
-    new_x = player_pos + dx
-    if 0 <= new_x <= ROOM_WIDTH - 5:
-        player_pos = new_x
+    # --- HEALTH + INVENTORY BELOW MAP ---
+    health_str = ""
+    for i in range(max_health):
+        if i == 0:
+            health_str += "💜" if health > 0 else "🖤"
+        else:
+            health_str += "💔" if i < health else "🖤"
+    print(f"Health: {health_str}")
+
+    inv_text = f"Latest Item: {item_emoji} {latest_item}" if latest_item else "Latest Item: None"
+    print(center_text(inv_text))
+
+    if celestial_adrenaline:
+        print(center_text("CELESTIAL ADRENALINE!"))
+
+    print("\n[A/D = Move | SPACE = Jump | 1 = Dash (if item) | ENTER = Back]")
 
 # --- PLANET LOOP ---
 def planet_loop():
-    global frame
-    head_dir = "center"
-    idle_timer = 0
-    breathe_state = False
-    moving = False
+    global player_world_x, player_y, y_velocity
+    global celestial_item_obtained, player_dash_ready, dash_cooldown, dash_time
+    global health, celestial_adrenaline, adrenaline_time, last_damage_time
+    global player_speed, player_jump
+    global latest_item
+
+    # reset stats on planet enter
+    health = max_health
+    celestial_adrenaline = False
+    adrenaline_time = 0
+    last_damage_time = 0
+    player_speed = 1
+    player_jump = JUMP_FORCE
+    dash_cooldown = 0
+    dash_time = 0
+    player_dash_ready = celestial_item_obtained
+    player_world_x = PLANET_WIDTH // 2
+    player_y = PLANET_HEIGHT - 2
+    y_velocity = 0
+
+    frame_count = 0
+    cam_pos = 0
 
     while True:
-        frame = (frame + 1) % 2
+        # GRAVITY
+        y_velocity += GRAVITY
+        if y_velocity > MAX_FALL_SPEED:
+            y_velocity = MAX_FALL_SPEED
+        next_y = player_y + (1 if y_velocity > 0 else -1)
+        if not is_solid(int(player_world_x), next_y):
+            player_y = next_y
+        else:
+            y_velocity = 0
+
+        # DASH HANDLING
+        if dash_time > 0:
+            dash_time -= 1
+            move_amount = DASH_SPEED
+        else:
+            move_amount = player_speed
+
+        # INPUT
         if msvcrt.kbhit():
             key = msvcrt.getch()
-            if key == b'a':
-                move_player(-1)
-                head_dir = "left"
-                idle_timer = 0
-                moving = True
-            elif key == b'd':
-                move_player(1)
-                head_dir = "right"
-                idle_timer = 0
-                moving = True
+            if key == b'a' and health>0:
+                if not is_solid(int(player_world_x - move_amount), player_y):
+                    player_world_x -= move_amount
+            elif key == b'd' and health>0:
+                if not is_solid(int(player_world_x + move_amount), player_y):
+                    player_world_x += move_amount
+            elif key == b' ' and y_velocity==0:
+                player_y += player_jump
+            elif key == b'1' and latest_item == "Celestial Beginnings" and dash_cooldown==0:
+                dash_time = DASH_DURATION
+                dash_cooldown = 20
             elif key == b'\r':
                 break
-        else:
-            idle_timer += 1
-            moving = False
 
-        if not moving and idle_timer > 10:
-            breathe_state = not breathe_state
-            draw_scene(player_pos, "center", 1, breathe_state)
-            time.sleep(0.6)
-        elif moving:
-            draw_scene(player_pos, head_dir, frame, False)
-            time.sleep(0.1)
-        else:
-            draw_scene(player_pos, head_dir, 1, False)
-            time.sleep(0.2)
+        # ENEMY MOVEMENT
+        for e in enemies:
+            if health>0:
+                new_x = e["x"] + e["dir"] * e["speed"]
+                if new_x < 0 or new_x >= PLANET_WIDTH:
+                    e["dir"] *= -1
+                elif is_solid(int(new_x), e["y"]):
+                    e["dir"] *= -1
+                else:
+                    e["x"] = new_x
+
+        # COLLISION WITH ENEMY
+        for e in enemies:
+            if int(e["x"]) == int(player_world_x) and e["y"] == player_y:
+                if dash_time>0:
+                    enemies.remove(e)
+                else:
+                    health -= 1
+                    last_damage_time = frame_count
+                    if health==0:
+                        clear()
+                        print(center_text("GAME OVER"))
+                        time.sleep(2)
+                        return
+
+        # PICKUP ITEM
+        if not celestial_item_obtained and int(player_world_x) == item_pos[0] and player_y == item_pos[1]:
+            celestial_item_obtained = True
+            latest_item = "Celestial Beginnings"
+            player_dash_ready = True
+            player_speed = 2
+            player_jump = -7
+            print(center_text("You obtained Celestial Beginnings!"))
+            time.sleep(1)
+
+        # HEALTH REGEN
+        if frame_count - last_damage_time >= HEART_REGEN_DELAY*20 and health<max_health:
+            health += 1
+            last_damage_time = frame_count
+
+        # CELESTIAL ADRENALINE
+        if health==1 and not celestial_adrenaline:
+            celestial_adrenaline = True
+            adrenaline_time = 400
+        if celestial_adrenaline:
+            adrenaline_time -=1
+            if adrenaline_time<=0:
+                celestial_adrenaline=False
+                player_speed=1
+                player_jump=-4
+
+        # CAMERA
+        cam_pos = int(player_world_x - player_screen_x)
+        cam_pos = max(0, min(cam_pos, PLANET_WIDTH - CAM_VIEW))
+
+        draw_scene(cam_pos)
+
+        if dash_cooldown>0:
+            dash_cooldown -=1
+
+        time.sleep(0.05)
+        frame_count += 1
+
 
 # --- SPACESHIP HUB ---
 def spaceship_hub(username):
